@@ -1,0 +1,338 @@
+---
+title: "round_3_reliability"
+author: "Drew Walker"
+date: "10/24/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(irr)
+library(janitor)
+library(table1)
+library(here)
+library(gt)
+```
+
+
+```{r read-and-clean-data}
+# User location: 
+# Drew data cleaning
+raw_annotation_data_dw <- read_csv("sample_location_sn_posts_revised_750.csv") %>% 
+  clean_names()
+dw_100_annotated <- raw_annotation_data_dw %>% 
+  head(100) %>% 
+mutate(source_drew = case_when(annotation_source %in% c("1","4") ~ 1,
+                                 annotation_source %in% c("2","3")~ 0),
+       user_drew = case_when(annotation_source %in% c("2","4")~1,
+                                 annotation_source %in% c("1","3")~0))
+#Drew Data clean
+drew_data <- dw_100_annotated %>% 
+  select(row_id_new,sentence,locations,source_drew,user_drew)
+write_csv(drew_data, "100_sn_location_annotaion_drew_complete.csv")
+drew_merge_data <- drew_data %>% 
+  select(row_id_new,source_drew,user_drew)
+# Sudeshna data clean
+raw_annotation_data_sudeshna <- read_csv("100_sn_location_annotation_sudeshna_complete.csv") %>% 
+  clean_names() %>% 
+  rename(user_sudeshna = user_location,
+         source_sudeshna = source_location) %>% 
+  select(row_id_new,sentence,locations,source_sudeshna,user_sudeshna)
+
+#combined_data_clean
+combined_df_clean <- left_join(raw_annotation_data_sudeshna,drew_merge_data, by = "row_id_new")
+
+combined_df_clean$location_list <- as.list(strsplit(combined_df_clean$locations,","))
+length(combined_df_clean$location_list[[14]])
+combined_df_clean2 <- combined_df_clean %>%
+  group_by(row_id_new) %>% 
+  mutate(multiple_locations = ifelse(map_int(location_list, length) > 1, 1, 0))
+
+
+
+unnested_df_clean <- combined_df_clean2 %>% 
+  unnest(location_list) 
+# Need to create column for final score
+
+single_locations <- unnested_df_clean %>% 
+  filter(multiple_locations == 0)
+# For agreements, make whatever Drew/Sudeshna said to carry forward agreements. 
+# Add Adjudications
+
+# For multiple locations: 
+# 1. Grab df of multiple locations
+
+
+multiple_locations <- unnested_df_clean %>% 
+  filter(multiple_locations == 1)
+# 2. Erase the original codes for these multiple to overwrite them 
+multiple_locations$user_sudeshna <- ""
+multiple_locations$source_sudeshna <- ""
+
+multiple_locations$user_drew <- ""
+multiple_locations$source_drew <- ""
+# 2b. Number each sequential location to distinguish same country used twice
+multiple_locations2 <- multiple_locations %>% 
+  select(row_id_new,sentence,location_list,source_sudeshna,user_sudeshna,source_drew,user_drew,multiple_locations,locations) %>% 
+  group_by(row_id_new) %>% 
+  mutate(location_number = seq_along(location_list))
+write_csv(multiple_locations2,"multiple_location_sn_annotation.csv", na = "")
+# 3. Annotaion of the multiples at the location level for Drew + Sudeshna
+# 4. Assess IR for multiple locations
+# 5. Adjudicate 
+# 6. Create gold standard final labels for multiple
+# 7. Merge into gold standard final labels for single-- add these adjudications above 
+
+# Additional labels
+
+## Explode the 750 sentence sample by duplicating all elements in location list 
+## Integrate gold label annotations for first 100
+## Split remaining 500 between two sections-- Sudeshna = 250, me = 250 
+
+# Run models
+```
+
+# Interrater kappas 
+
+
+```{r create-users-data-and-kappa}
+# Users df
+users_sudeshna <- raw_annotation_data_sudeshna %>% 
+  select(row_id_new,user_sudeshna)
+users_drew <- drew_data %>% 
+  select(row_id_new,user_drew)
+
+#Join
+combined_users <- left_join(users_sudeshna,users_drew, by = "row_id_new") %>% 
+  select(user_drew,user_sudeshna)
+
+user_location_kappa <- irr::kappa2(combined_users)
+user_location_kappa
+
+```
+
+```{r create-source-location-data-and-kappa}
+# Source location df
+source_sudeshna <- raw_annotation_data_sudeshna %>% 
+  select(row_id_new,source_sudeshna)
+source_drew <- drew_data %>% 
+  select(row_id_new,source_drew)
+
+#Join
+combined_locations <- left_join(source_sudeshna,source_drew, by = "row_id_new") %>% 
+  select(source_drew,source_sudeshna)
+
+source_location_kappa <- irr::kappa2(combined_locations)
+source_location_kappa
+
+```
+
+
+# ID Disagreements 
+
+```{r disagreements}
+combined_location_user_df_clean <- combined_df_clean %>% 
+  mutate(user_agree = case_when(user_drew==user_sudeshna~1, TRUE~0),
+         source_agree = case_when(source_drew==source_sudeshna~1,TRUE~0))
+table(combined_location_user_df_clean$user_agree) 
+table(combined_location_user_df_clean$source_agree)
+
+source_disagreements <- combined_location_user_df_clean %>% 
+  filter(source_agree == 0)
+gt(source_disagreements) %>% 
+  tab_header("Source Disagreements")%>% 
+  gtsave("Source_disagreements.html", inline_css = TRUE, 
+         path = here())
+
+
+user_disagreements <- combined_location_user_df_clean %>% 
+  filter(user_agree == 0)
+gt(user_disagreements) %>% 
+  tab_header("User Disagreements")%>% 
+  gtsave("user_disagreements.html", inline_css = TRUE, 
+         path = here())
+
+agreements <- combined_location_user_df_clean %>% 
+  filter(user_agree == 1& source_agree ==1) %>% 
+  mutate(source_location_label = source_drew,
+         user_location_label = user_drew)
+
+
+disagreements <- rbind(user_disagreements,source_disagreements) %>% 
+  distinct(row_id_new, .keep_all = TRUE) %>% 
+  mutate(source_location_label= "",
+         user_location_label = "")
+write_csv(disagreements, "disagreements_to_adjudicate.csv")
+
+
+```
+
+# Adjudications
+
+```{r adjudications}
+
+adjudications <- read_csv("disagreements_to_adjudicate_sd.csv") %>% 
+  filter(!is.na(row_id_new)) 
+
+gold_standard_single_locations <- bind_rows(agreements,adjudications)
+
+gold_multiple_location <- gold_standard_single_locations %>% 
+  unnest(location_list) %>% 
+  rename(location = location_list) %>% 
+    group_by(row_id_new) %>% 
+  mutate(multiple_locations = ifelse(map_int(list(locations), length) > 1, 1, 0),
+         location_number = seq_along(locations))
+
+# Now, for ones with < 1 location, erase the original adjudication
+# Bring in multiple location annotations
+
+```
+
+```{r multiple-locations}
+sudeshna_multi_annotations <- read_csv("multiple_location_sn_annotation sudeshna.csv") %>% 
+  rename(location = location_list) %>% 
+  select(-source_drew,-user_drew)
+
+drew_multi_annotations <- read_csv("multiple_location_sn_annotation drew.csv") 
+# Merge my codes by row_id_new + location + location sequence 
+drew_multi_annotations_clean <- drew_multi_annotations %>% 
+  select(row_id_new,location,location_number,source_drew,user_drew)
+
+combined_multi_annotations <- left_join(sudeshna_multi_annotations,drew_multi_annotations_clean, by = c("row_id_new","location","location_number")) 
+
+# 100% IRR, just overwrite sudeshna variable to make final code
+combined_multi_annotations_merge <- combined_multi_annotations %>% 
+  rename(source_location_label = source_sudeshna,
+         user_location_label = user_sudeshna) %>% 
+  select(row_id_new,sentence,location,location_number,source_location_label,user_location_label)
+  
+
+# Merge with single annotations -- replace the original codes there
+gold_multiple_locations_merge <- gold_multiple_location %>% 
+  filter(multiple_locations == "0") %>% 
+  select(row_id_new,Sentence=sentence,location,location_number,source_location_label,user_location_label)
+
+gold_standard_multi_100_sentences <- bind_rows(gold_multiple_locations_merge,combined_multi_annotations_merge)
+
+write_csv(gold_standard_multi_100_sentences,"gold_standard_multi_100_sentences.csv")
+```
+
+
+# Explode original 750 dataset by location
+
+```{r dataset-750}
+dataset_1000_sample<- read_csv("sample_location_sn_posts_dw_first_750.csv")
+colnames(dataset_1000_sample)
+
+dataset_1000_sample$locations <- as.list(strsplit(dataset_1000_sample$locations,","))
+
+unnested_1000_sample <- dataset_1000_sample %>% 
+  unnest(locations) %>% 
+  group_by(ROW_ID_new) %>% 
+  mutate(location_number = seq_along(locations)) %>% 
+  rename(location= locations,
+         row_id_new = ROW_ID_new) %>% 
+  ungroup() %>% 
+  distinct(row_id_new,location,location_number,Sentence, .keep_all = TRUE)
+#1200 full sample
+# These locations are not broken up by sentence-- it's on post 
+write_csv(unnested_1000_sample,"unnested_1000_sample.csv")
+
+## GOLD STANDARD ##### 
+#Update what has already been confirmed as gold standard
+gold_323 <- read_csv("gold-323.csv") %>% 
+  distinct(row_id_new = rowidnew,location,location_number=locnum,Sentence=sentence, .keep_all = TRUE) %>% 
+  select(row_id_new,location,location_number,Sentence,source_label = source,user_label = user)
+
+# Drew Round 2 200 
+# Read in new .csvs here, making sure columns are clean before row_bind
+str(gold_323)
+str(drew_round_2_200)
+drew_round_2_200 <- read_csv("cdc_sn_drew_200_annotation_round_2_complete.csv")
+
+# Rbind into existing gold_standard
+
+gold_522 <- bind_rows(gold_323,drew_round_2_200)
+
+### NOT YET CODED IDENTIFY###### 
+unnested_1000_sample$row_id_new <- as.character(unnested_1000_sample$row_id_new)
+
+unnested_1000_sample$location_number <- as.character(unnested_1000_sample$location_number)
+# gold
+gold_522$row_id_new <- as.character(gold_522$row_id_new)
+
+gold_522$location_number <- as.character(gold_522$location_number)
+
+sample_to_annotate <- anti_join(unnested_1000_sample,gold_522, by = c("row_id_new","location","location_number","Sentence"), stringsAsFactors=FALSE)
+
+
+str(sample_to_annotate)
+str(gold_522)
+
+### DUPLICATE REMOVAL #####
+sample_to_annotate %>% 
+  distinct(row_id_new,location,location_number,Sentence)
+##1120 distinct left, first round of 100 was actually 80 distinct 
+
+# Get next 400 #####
+
+sample_to_annotate_400 <- sample_to_annotate %>% 
+  head(n = 400) %>% 
+  select(row_id_new,post_text,location,location_number,Sentence) %>% 
+  mutate(source_label = "",
+         user_label ="")
+# Clean and Split between coders ####
+#Sudeshna 
+sample_to_annotate_sudeshna_200 <- sample_to_annotate_400 %>% 
+  head(n = 200) %>% 
+  select(-post_text)
+write_csv(sample_to_annotate_sudeshna_200,"cdc_sn_sudeshna_200_annotation_round_3.csv")
+# Drew
+sample_to_annotate_drew_200 <- sample_to_annotate_400 %>% 
+  tail(n = 200) %>% 
+    select(-post_text)
+write_csv(sample_to_annotate_drew_200,"cdc_sn_drew_200_annotation_round_2.csv")
+
+
+
+## Test all new ones are not in originally coded gold standard ######
+
+# Are there any in the new sample to annotate that have been previously coded?
+test <- semi_join(sample_to_annotate,gold_522, by = c("row_id_new","location","location_number","Sentence"))
+
+#doesn't work with merge either
+test_merge <- merge(sample_to_annotate, gold_522, by = c("row_id_new","location","location_number","Sentence"), all = FALSE)
+
+#Are there any overlap between two annotator datasets?
+test2 <- semi_join(sample_to_annotate_sudeshna_200,sample_to_annotate_drew_200, by = c("row_id_new","location","location_number","Sentence"))
+# To add new gold standard, simply edit the code under gold standard to include new values  
+
+gold_522 %>% 
+  distinct(row_id_new,location,location_number,Sentence)
+write_csv(gold_522,"gold_522_dw.csv")
+
+```
+
+
+# Gold standard set for RoBERTa
+```{r gold-standard-for-roberta}
+gold_522_export <- %>% %>% 
+  select(rowidnew = row_id_new,
+         sentence = Sentence,
+         location,
+         locnum = location_number,
+         source = source_label,
+         user = user_label
+  )
+write_csv(gold_522_export,"gold-522.csv")
+```
+
+
+
+# Anti-join with the gold standard set
+# cut the first 200, give to Sudeshna
+# Cut the second 200, give to u
+# code last amount
+# Retrain model on new gold standard data
+
