@@ -1,3 +1,4 @@
+import sklearn
 from sklearn.feature_extraction.text import CountVectorizer
 import pandas as pd
 import os
@@ -11,13 +12,13 @@ from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 import string
-from wordcloud import WordCloud
 import matplotlib.pyplot as plt
 import spacy
 from spacy.lang.en import English
 import numpy as np
 
-ICDs = pd.read_csv('DIAGNOSES_ICD.csv.gz', compression='gzip',
+# ICDs is a table of all the patients and their assigned ICD-9 codes. Seq number is the number in which its listed in the chart-- need to investigate this
+ICDs = pd.read_csv(r"\Users\awalk55\OneDrive - Emory University\Desktop\Diss_Detecting_Provider_Bias\MIMIC-III Data\DIAGNOSES_ICD.csv.gz", compression='gzip',
     header=0, sep=',', quotechar='"')
 peek_ICDs = ICDs.head()
 print(peek_ICDs)
@@ -35,17 +36,20 @@ print(icds_of_interest.head())
 
 icds_of_interest.info()
 
-patients_unique = icds_of_interest['SUBJECT_ID'].drop_duplicates()
+#patients_unique = icds_of_interest['SUBJECT_ID'].drop_duplicates()
 
-NOTES = pd.read_csv('NOTEEVENTS.csv.gz', compression='gzip',
+NOTES = pd.read_csv(r"\Users\awalk55\OneDrive - Emory University\Desktop\Diss_Detecting_Provider_Bias\MIMIC-III Data\NOTEEVENTS.csv.gz", compression='gzip',
     header=0, sep=',', quotechar='"')
+peek_notes = NOTES.head()
+print(peek_notes)
 
-biased_notes_corpus = NOTES.merge(patients_unique, on = 'SUBJECT_ID')
-
-PATIENTS = pd.read_csv('PATIENTS.csv.gz', compression='gzip',
+PATIENTS = pd.read_csv(r"\Users\awalk55\OneDrive - Emory University\Desktop\Diss_Detecting_Provider_Bias\MIMIC-III Data\PATIENTS.csv.gz", compression='gzip',
     header=0, sep=',', quotechar='"')
 peek_patients = PATIENTS.head()
 print(peek_patients)
+
+biased_notes_corpus = NOTES.merge(PATIENTS, on = 'SUBJECT_ID')
+
 
 biased_notes_patients_corpus = biased_notes_corpus.merge(PATIENTS, on = 'SUBJECT_ID')
 
