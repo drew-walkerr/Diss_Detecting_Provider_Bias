@@ -1,0 +1,696 @@
+---
+title: "SGL Growth Models"
+author: "Drew Walker"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+**This study aims to assess the effects of virtual social events on
+Streetlight Gaming and Online Team patient, volunteer, and staff
+comments on Discord.**
+
+Streetlight is a palliative care peer support program at UF Health
+Shands Children's Hospital. Streetlight Gaming and Online Team is an
+online health community Discord server moderated by program staff and
+volunteers to allow patients to connect with each other throughout
+hospital admissions. In Discord, since 2018, we have hosted virtual
+events ranging from Mario Kart tournaments to years-long Dungeons and
+Dragons campaigns, to late night Among Us sessions. Since 2018, we have
+also collected data on daily user comment totals, which we aggregate
+into a large dataset containing data on all daily comment totals for all
+patients, volunteers, and staff.
+
+We also keep detailed event logs, documenting when events in the server
+are facilitated and which players attended.
+
+# Model Building
+
+-   **Outcome**: User daily comments in Discord (recent comments)
+
+-   **Level 1 Predictors**:
+
+    -   Time/Individual repeated measures (Days in Discord)
+    -   What about days since Discord started (for each date? equal
+        across all users)
+    -   Number of days since comment pull?
+
+-   **Level 2 Predictors**:
+
+    -   Patient, Volunteer, or Staff status,
+
+-   **Level 3 Predictor**:
+
+    -   Number of overall users in Discord
+
+    -   number of comments in overall server on that day
+
+    -   Number of days since comment was last pulled that day?
+
+-   **Level 4 Predictors**:
+
+    -   Presence of an event during that day
+
+    -   Presence of seasonal event that day.
+
+Data Description
+
+-   71,833 daily comment total observations, filtered to 71725 due to
+    issues with data carried over from users already in Discord server.
+
+-   Total of 189 Users
+
+    -   \# Patients
+
+    -   \# Volunteers
+
+    -   \# Staff
+
+Although the data is daily comment totals, it is not regularly spaced in
+timed intervals-- we run the code when we are able to on weekdays, but
+due to concerns for patient data, we cannot schedule the code to be run
+every day on a server
+
+-   Average day difference ?
+
+Events are also not occurring at regular intervals-- we schedule them at
+the discretion of staff or patient need. I'm hoping this project, framed
+as a quality improvement effort, will help program staff understand the
+value in these events at driving community engagement, and be willing to
+justify allocation of funds to these key moderator roles.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(table1)
+library(nlme)
+library(here)
+here()
+library(foreign)
+library(gt)
+library(redcapAPI)
+library(scales)
+library(lme4)
+library(lubridate)
+library(sjPlot)
+library(sjmisc)
+library(patchwork)
+library(sjlabelled)
+#install.packages('TMB', type = 'source')
+#library(TMB)
+#Read in data from REDCap on discord user ids, names and status
+options(scipen = 100)
+redcap_api_url <- 'https://redcap.ctsi.ufl.edu/redcap/api/' 
+#set options to allow us to access project files
+#below is the token and urls
+options(redcap_api_url)
+APIToken <- read_csv("apitoken.csv", col_names = FALSE)
+StreetlightDatabaseToken <- as.character(APIToken[1,1])
+rcon <- redcapConnection(redcap_api_url, token = StreetlightDatabaseToken)
+REDCapData_Patients <- exportRecords(rcon,labels = FALSE)
+
+VolToken <- read_csv("volunteertoken.csv", col_names = FALSE)
+StreetlightVolunteerToken <- as.character(VolToken[1,1])
+vcon <- redcapConnection(redcap_api_url, token = StreetlightVolunteerToken)
+Volunteers_REDCap <- exportRecords(vcon,labels = FALSE)
+
+```
+
+# Load in data from REDCap/last SGL data pull
+
+<https://rpsychologist.com/r-guide-longitudinal-lme-lmer>
+
+```{r SGL-data}
+library(haven)
+load("sgl_comments_data.Rda")
+
+# output for hlm to get equation
+hlm_snip <- firstday_set_filtered %>% 
+  head(n = 600)
+
+write_csv(hlm_snip, "sgl_snip.csv")
+# Extra fun bc hlm doesn't work well with csv?
+write.dta(hlm_snip, "sgl_snip.dta")
+
+tmp <- tempfile(fileext = ".xpt")
+write_xpt(hlm_snip, tmp)
+write_sav(hlm_snip, "hlm_snip.sav")
+
+
+library(nlme)
+library(lme4)
+#firstday_set$days_since_discord_first_comment<- #as.numeric(str_remove(firstday_set$days_since_discord_first_comme#nt, " days"))
+#firstday_set$record_id <- as.factor(firstday_set$record_id)
+
+# After first visualization, realize we need to remove data from 2019-01-24, because it caught existing discord users who were in server prior to data being collected. 
+
+# Also after 2019-09-16 due to error in code that produced negative value
+#firstday_set_filtered <- firstday_set %>% 
+#  filter(date != "2019-01-24") %>% 
+#  filter(date !="2019-09-16") %>% 
+#  left_join(daily_summaries, by = "date")
+
+#save(firstday_set_filtered,file="sgl_comments_data.Rda")
+
+
+sgl_descriptives_df <- firstday_set_filtered %>% 
+  distinct(record_id,status, .keep_all = TRUE)
+
+date_list <- as.factor(firstday_set_filtered$date)
+
+unique_date_list <- as.character(date_list) %>% 
+  unique() %>% 
+  as.Date()
+
+TotalCommentStatusSummary <- firstday_set_filtered %>% 
+  filter(date == "2022-01-19") %>% 
+  group_by(status) %>% 
+  summarise(status_message_count = sum(message_count))
+TotalCommentStatusSummary <- TotalCommentStatusSummary %>% 
+  ungroup() %>% 
+  mutate(total_messages = sum(status_message_count),
+         percentage_messages = ((status_message_count/total_messages)*100))
+
+#Tables 
+totalstatustable <- gt(TotalCommentStatusSummary)
+totalstatustable
+
+
+
+
+sgl_descriptives_df$status <- as.factor(sgl_descriptives_df$status)
+table1(~status, data = sgl_descriptives_df)
+# Recent comments by status 
+table1(~recent_comments|status, data = firstday_set_filtered)
+
+days_since_df <- firstday_set_filtered %>% 
+  filter(date == "2022-01-19") %>% 
+  distinct(record_id, .keep_all = TRUE)
+table1(~days_since_discord_first_comment|status, data = days_since_df)
+
+# Now we joined daily overall server summaries, which gives us
+# users in discord, day's total discord comments, and active users
+# Plot LOESS curve
+
+plot_obs <- ggplot(data=firstday_set_filtered,         
+                   aes(x = days_since_discord_first_comment,
+                       y = recent_comments, group = record_id,color=status))+
+  geom_line()+
+  #adding lines to plot
+                   theme_classic() + 
+  scale_x_continuous(name = "Day since first comment")+
+                   scale_y_continuous(name = "Daily Comments") 
+plot_obs
+
+plot_facet <- ggplot(data = firstday_set_filtered, aes(days_since_discord_first_comment,recent_comments))+
+         geom_line(aes(color = status))+
+  ggtitle('Daily commenting trends for Streetlight Gaming and Online Team, January 2019-2022')+
+  theme_classic() +
+  facet_wrap(~ record_id)
+plot_facet
+
+ggsave('sgl_facet.png', width = 50, height = 50, units = "in", limitsize = FALSE)
+
+# Facet by status 
+
+plot_facet_status <- ggplot(data = firstday_set_filtered, aes(days_since_discord_first_comment,recent_comments))+
+         geom_line(aes(color = status))+
+  ggtitle('Daily commenting trends for Streetlight Gaming and Online Team, January 2019-2022')+
+  theme_classic() +
+  facet_wrap(~ status)
+plot_facet_status
+
+ggsave('sgl_facet_status.png', width = 10, height = 10, units = "in", limitsize = FALSE)
+
+
+# adding staff and volunteer comments made per day
+
+
+status_total_dailies<- aggregate(firstday_set_filtered$recent_comments, by = list(firstday_set_filtered$date, firstday_set_filtered$status), FUN = sum) %>% 
+  pivot_wider(names_from = Group.2,
+              values_from = x) %>% 
+  rename(date = Group.1,
+         patient_comments = Patient,
+         staff_comments = Staff,
+         volunteer_comments = Volunteer)
+
+```
+
+```{r, pt-descriptives}
+# make today be the last day of data collection
+SGLPatientsREDCap <- REDCapData_Patients %>% 
+  group_by(record_id) %>% 
+  fill(bday,deceased,discord_user,discord_invite_status) %>% 
+  mutate(team_cancer = unclass(first(project_team___1)),
+    team_cf = unclass(first(project_team___2)),
+    team_transplant = unclass(first(project_team___3)),
+    team_sicklecell = unclass(first(project_team___4)),
+    team_autoimmune = unclass(first(project_team___5)),
+    team_gi = unclass(first(project_team___6)),
+    team_other = unclass(first(project_team___7)),
+    predicted_project_team = first(predicted_project_team)) %>% 
+  pivot_longer(cols = starts_with("team_"),names_to = "project_team", values_to = "team_value", values_drop_na = TRUE) %>%
+  dplyr::select(record_id,id,discord_user,discord_invite_status,bday,deceased,predicted_project_team,project_team,preferred_gender,vol_preferred_pronouns___1,vol_preferred_pronouns___2,vol_preferred_pronouns___3,team_value,status,date_of_death) %>% 
+  fill(discord_user,discord_invite_status,bday,deceased,predicted_project_team,project_team,preferred_gender,vol_preferred_pronouns___1,vol_preferred_pronouns___2,vol_preferred_pronouns___3,team_value,status,date_of_death) %>% 
+  filter(team_value == "2") %>% 
+  distinct(record_id, .keep_all = TRUE)
+
+today <- as.Date(Sys.Date())
+intervalbday <- SGLPatientsREDCap$bday %--% today
+SGLPatientsREDCap$age <- intervalbday
+patients_only <- sgl_descriptives_df %>% 
+  filter(status == "Patient")
+patient_list <- patients_only %>% 
+  distinct(record_id)
+patient_descriptives1 <- left_join(patient_list,SGLPatientsREDCap, by = "record_id") 
+# Non deceased patient descriptives 
+
+living_patient_descriptives <- patient_descriptives1 %>% 
+  filter(is.na(deceased)|deceased != "Yes")
+
+living_patient_descriptives$age <- as.numeric(living_patient_descriptives$age)/31536000
+
+living_patient_descriptives$project_team <- as.factor(living_patient_descriptives$project_team)
+living_patient_descriptives$project_team <- relevel(living_patient_descriptives$project_team, ref = "team_other")
+
+table1(~age + deceased + predicted_project_team + project_team + preferred_gender, data = living_patient_descriptives)
+
+# all patient descriptives 
+
+# Non deceased patient descriptives 
+
+patient_descriptives <- patient_descriptives1 
+
+patient_descriptives$age <- as.numeric(patient_descriptives$age)/31536000
+
+patient_descriptives$project_team <- as.factor(patient_descriptives$project_team)
+patient_descriptives$project_team <- relevel(patient_descriptives$project_team, ref = "team_other")
+
+table1(~age + deceased + predicted_project_team + project_team + preferred_gender, data = patient_descriptives)
+
+
+LastDayCommentsDF <- firstday_set_filtered %>% 
+  filter(date == "2022-01-19") 
+
+
+patient_descriptives_comment_total <- left_join(patient_descriptives,LastDayCommentsDF, by = "record_id")
+
+comments_by_project_team <- patient_descriptives_comment_total %>% 
+group_by(project_team) %>% 
+  summarise(team_message_count = sum(message_count))
+comments_by_project_team
+
+```
+
+# EDA Visualization
+
+-   Need to check for missingness among predictors to be able to compare
+    models across unconditional, etc.
+
+```{r visualization}
+plot<- ggplot(firstday_set_filtered, aes(x=date, y=recent_comments, color = status)) + 
+  geom_line()+
+  scale_y_continuous(name="Recent Comments")+
+  theme_classic()+
+  ggtitle("Daily Comments by Streetlight Status, Jan 2019-Jan 2022")
+plot
+```
+
+## Event list
+
+-   First, we qualitatively analyzed the event list to remove any
+    non-patient events in the server. The SGL recruit log utilized for
+    the events would often contain admin or server feature changes. We
+    wanted to make sure this list was only providing data on when staff,
+    volunteer, or patient-facilitated events occurred.
+
+-   Seasonal events
+
+    -   Summer Games
+
+        -   Need to go back and make sure we input every event and the
+            exact dates-- check Discord
+
+```{r event-log-and-variable-transforming}
+event_log <- read_csv("DeIdentified Event log.csv")
+
+event_log$`Event Date` <- as.Date(event_log$`Event Date`, format = "%m/%d/%Y" )
+  
+event_log_clean <- event_log %>%   
+  mutate(event_present = 1) %>% 
+  rename(date = `Event Date`) 
+# Seasonal events
+seasonal_events <- read_csv("seasonal_events.csv")
+seasonal_events$date <- as.Date(seasonal_events$date, format = "%m/%d/%Y" ) 
+seasonal_events <- seasonal_events %>% 
+  drop_na()
+#266 days of seasonal events -- where patients engaged in challenges 
+
+
+event_and_comment_df <- left_join(firstday_set_filtered,event_log_clean, by = "date")
+
+# replace NA with 0 for days without events
+event_and_comment_df$event_present[is.na(event_and_comment_df$event_present)] <- 0
+event_and_comment_df$event_present <- as.factor(event_and_comment_df$event_present)
+event_and_comment_df <- event_and_comment_df %>%
+  mutate(day_of_week = wday(date),
+         years_since_discord = days_since_discord_first_comment/365)
+
+event_and_comment_df$day_of_week <- factor(event_and_comment_df$day_of_week, ordered = FALSE)
+
+event_and_comment_df_descriptives <- left_join(event_and_comment_df,patient_descriptives, by = "record_id")
+# join in seasonal events
+event_and_comment_df_descriptives_2 <- left_join(event_and_comment_df_descriptives,seasonal_events, by = "date")
+#make non seasonal event days 0
+event_and_comment_df_descriptives_2$seasonal_event[is.na(event_and_comment_df_descriptives_2$seasonal_event)] <- 0
+event_and_comment_df_descriptives_2$seasonal_event <- as.factor(event_and_comment_df_descriptives_2$seasonal_event)
+event_and_comment_df_descriptives_2 <- event_and_comment_df_descriptives_2 %>% 
+  mutate(commented_that_day = case_when(recent_comments >0 ~ "1", 
+                                        TRUE ~ "0"))
+patients_only1_living <- event_and_comment_df_descriptives_2 %>% 
+  filter(status.x == "Patient") %>% 
+  filter(deceased != "Yes")
+
+deceased <- event_and_comment_df_descriptives_2 %>% 
+  filter(deceased == "Yes") %>% 
+  filter(date < date_of_death)
+
+
+#7539 before filtering death_date
+patients_only1 <- rbind(patients_only1_living,deceased)
+
+
+write_csv(deceased, "SGL_deceased_list.csv")
+
+# Top users at 1-19-2022, assign quartiles for rank in total comments
+patient_comment_total <- days_since_df %>% 
+  dplyr::select(record_id, message_count) 
+patient_comment_total$quartile <- as.factor(ntile(patient_comment_total$message_count, 4))
+
+patients_only2 <- left_join(patients_only1,patient_comment_total,by="record_id")
+patients_only3 <- patients_only2 %>% 
+  mutate(years_squared = years_since_discord^2,
+         years_cubed = years_since_discord^3,
+         stand_recent_comments = scale(recent_comments),
+         stand_active_users = scale(active_users))
+
+patients_only <- left_join(patients_only3,status_total_dailies, by = "date")
+
+event_plot <- ggplot(patients_only, aes(x=date, y=event_present)) + 
+  geom_point(na.rm = T,
+             color = "black",
+             fill = "#69b3a2",
+             size = .25,
+             alpha = .10)+
+  theme_classic()+
+  ggtitle("Daily Events in SGOT, Jan 2019-Jan 2022")
+event_plot
+seasonal_plot <- ggplot(patients_only, aes(x=date, y=seasonal_event)) + 
+   geom_point(na.rm = T,
+             color = "orange",
+             fill = "orange",
+             shape = 22,
+             alpha = .1)+
+  theme_classic()+
+    ggtitle("Seasonal Events in SGOT, Jan 2019-Jan 2022")
+seasonal_plot
+
+active_users_plot <- ggplot(patients_only, aes(x=date, y=active_users)) + 
+  geom_line(color = "forest green")+
+  theme_classic()+
+    ggtitle("Daily Active Users in SGOT, Jan 2019-Jan 2022")
+active_users_plot
+
+
+
+library(patchwork)
+plot/event_plot/seasonal_plot/active_users_plot
+ggsave('comments_and_events.png', width = 10, height = 10, units = "in", limitsize = FALSE)
+
+table1(~recent_comments + years_since_discord, data = patients_only)
+```
+
+## Make sure we remove any data collection waves occurring after deathdate for the deceased patients 
+## filter date < death_date 
+
+
+# Unconditional Means, Unconditional Growth Models , and invididual covariate conditional growth models
+
+```{r unconditional-means}
+unconditional_means = lmer(recent_comments ∼ 1+ (1|record_id), data = patients_only, REML=FALSE)
+
+summary(unconditional_means)
+# Unconditional growth
+unconditional_growth = lmer(recent_comments ∼  years_since_discord + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+summary(unconditional_growth)
+
+individual_covariates = lmer(recent_comments ∼  years_since_discord + age + preferred_gender + project_team + deceased + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+summary(individual_covariates)
+
+
+
+tab_model(unconditional_means, unconditional_growth, individual_covariates, dv.labels = c("Model 1: Unconditional Means","Model 2: Unconditional Growth", "Model 3: Individual Covariates"), show.aic = TRUE, show.dev = TRUE)
+```
+# Unadjusted models 
+```{r unadjusted-discord-growth-event-models}
+event_model = lmer(recent_comments ∼  years_since_discord*event_present + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+summary(event_model)
+
+seasonal_model = lmer(recent_comments ~ years_since_discord*seasonal_event + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+summary(seasonal_model)
+#Active users as predcitor, unadjusted
+active_users_model = lmer(recent_comments ~ years_since_discord*active_users + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+# Comments Model
+status_comments_model = lmer(recent_comments ∼  years_since_discord+years_since_discord*staff_comments + years_since_discord*volunteer_comments + years_since_discord*patient_comments + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+tab_model(status_comments_model, dv.labels = c("comments model"), show.aic = TRUE, show.dev = TRUE)
+# ALL DISCORD PREDICTORS MODEL
+discord_predictors_all_model = lmer(recent_comments ~  years_since_discord*event_present + years_since_discord*seasonal_event + active_users + years_since_discord*active_users + years_since_discord*staff_comments + years_since_discord*volunteer_comments + years_since_discord*patient_comments +(years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+
+
+tab_model(event_model, seasonal_model, active_users_model, dv.labels = c("Model 1: Unadjusted Day Event Model","Model 2: Unadjusted Seasonal Event Model", " Model 3:Unadjusted Active Users Model"), show.aic = TRUE, show.dev = TRUE)
+
+# Years or without 
+
+
+```
+# Adjusted models
+```{r adjusted-models}
+
+# Daily 
+adj_event_model = lmer(recent_comments ∼  years_since_discord*event_present + age + preferred_gender + project_team + deceased + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+
+# Seasonal
+
+adj_seasonal_model = lmer(recent_comments ~ years_since_discord*seasonal_event + age + preferred_gender + project_team + deceased + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+# Active Users 
+
+adj_active_users_model = lmer(recent_comments ~ years_since_discord*active_users + age + preferred_gender + project_team + deceased + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+# Table
+tab_model(adj_event_model, adj_seasonal_model, adj_active_users_model, dv.labels = c("Model 4: Adjusted Day Event Model","Model 5: Adjusted Seasonal Event Model", " Model 6:Adjusted Active Users Model"), show.aic = TRUE, show.dev = TRUE)
+
+
+```
+
+
+
+## Other active users models, treating active users as outcome
+
+* likely that events may cause more active users, in which case we shouldn't control for it since it's a mediator to total comments? 
+
+* But it also is part of the OHC channel richness
+
+```{r conditional-growth-active-user-models}
+active_users_model = lmer(recent_comments ∼  years_since_discord*active_users + users_in_discord + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+active_users_day_df <- patients_only %>% 
+  ungroup() %>% 
+  distinct(date,seasonal_event,event_present,active_users,.keep_all = TRUE)
+
+
+active_users_outcome = (lm(active_users~event_present + seasonal_event, data = active_users_day_df))
+
+staff_comments_events = (lm(staff_comments~event_present + seasonal_event, data = active_users_day_df))
+
+tab_model(staff_comments_events, dv.labels = c("Staff Comments As Predicted by Events"), show.aic = TRUE, show.dev = TRUE)
+
+volunteer_comments_events = (lm(volunteer_comments~event_present + seasonal_event, data = active_users_day_df))
+
+tab_model(volunteer_comments_events, dv.labels = c("Volunteer Comments As Predicted by Events"), show.aic = TRUE, show.dev = TRUE)
+
+patient_comments_events = (lm(patient_comments~event_present + seasonal_event, data = active_users_day_df))
+
+tab_model(patient_comments_events, dv.labels = c("Patient Comments As Predicted by Events"), show.aic = TRUE, show.dev = TRUE)
+
+
+tab_model(active_users_model, dv.labels = c("Active Users Model"), show.aic = TRUE, show.dev = TRUE)
+
+
+active_users_outcome
+tab_model(active_users_outcome, dv.labels = c("Active Users As Predicted by Events"), show.aic = TRUE, show.dev = TRUE)
+
+```
+
+
+## Day of week simple linear regression
+
+```{r day-of-week}
+day_model <- lm(recent_comments ~ day_of_week + years_since_discord, data =patients_only)
+summary(day_model)
+```
+
+No significant effects identified for day of week in model 
+
+Descriptives at each level
+
+
+```{r descriptives}
+Final_comment_summary <- patients_only %>% 
+  filter(date == "2022-01-19") 
+sum(TotalCommentStatusSummary$message_count.x)
+
+```
+
+
+# Sobel test mediation of active users
+Do number of active users mediate the effects of events?
+https://advstats.psychstat.org/book/mediation/index.php
+
+```{r mediation}
+library(mediation)
+# Step 1: Showing effect of Events on Daily Comments (X with Y)
+# Step 2: Showing Events predicts Active Users (X with M)
+#Step 3and 4: Show active users affects y on boyh x and m , controlling for X (Both model). Show it completely mediates X-Y
+
+
+
+#Standardize models for mediation analysis
+
+#fit.mediator = (lm(stand_active_users~event_present + seasonal_event, data = active_users_day_df))
+
+#active_users_outcome_hlm = lmer(stand_active_users ∼  seasonal_event + event_present+ (years_since_discord|record_id), data = patients_only, REML=FALSE)
+#summary(active_users_outcome_hlm)
+
+#fit.dv = lmer(stand_recent_comments ~  years_since_discord*event_present + years_since_discord*seasonal_event + stand_active_users + (years_since_discord|record_id), data = patients_only, REML=FALSE)
+
+
+
+#results_daily = mediate(active_users_outcome_hlm, fit.dv, treat='event_present', mediator='stand_active_users', boot=T)
+
+#results_seasonal = mediate(fit.mediator, fit.dv, treat='seasonal_event', mediator='stand_active_users', boot=T)
+
+#tab_model(results_daily, results_seasonal, dv.labels = c("Active Users Mediating Daily Events","Active Users Mediating Seasonal Events", show.aic = TRUE, show.dev = TRUE)
+```
+# Identifying the "lurkers", patients who are on discord but not commenting
+
+"Lurkers" are users who do not comment, so would not have been picked up in this initial analysis. They still join the server and may have lurked, joined audio chat, or direct messaged any users.
+
+Also should report to how many this service was offered since Jan 2019, what % lurk(discord invite sent, not in sample), what % comment(in sample), what % are not interested , % reach-- get id list of patients admitted between Jan 2019 and Jan 2022 and what % of these patients got at least invited to SGoT 
+
+
+
+
+  * Lurkers = 
+  * * People who have gotten a confirmed discord invite, but are not in this study sample 
+  * * # of patients who refused SGL 
+  * * # of patients approached since study date
+  * * # of patients visited during this time 
+```{r lurkers}
+# Edit this to 
+between_dates_visit_df <- function(redcapdata,begin_date,until_date){
+visitsums <- REDCapData_Patients %>% 
+  dplyr::select(record_id,bday,age,deceased,start_date,last_visit_date,ff,issues,dd,date,project_team___1,project_team___2,project_team___3,project_team___4,project_team___5,project_team___6,project_team___7,predicted_project_team,comments_id,discord_user,discord_invite_status) %>% 
+  group_by(record_id) %>% 
+  fill(record_id,bday,age,deceased,start_date,last_visit_date,ff,issues,dd,project_team___1,project_team___2,project_team___3,project_team___4,project_team___5,project_team___6,project_team___7,predicted_project_team,comments_id,discord_user,discord_invite_status) %>% 
+  mutate(visit_time_since_start = date - start_date,
+        visit_weeks_since_start = as.numeric(visit_time_since_start/604800)) %>%
+  ungroup() %>% 
+  filter(as.Date(begin_date) <= date & date <= as.Date(until_date)) 
+today <- as.Date(Sys.Date())
+#full_list is an SNA useful dataframe in which each row is a unique volunteer on a unique visit date. This is all of the visits recorded for all patients, with visits repeated for each volunteer present. 
+return(visitsums)
+}
+
+lurkers <- between_dates_visit_df(REDCapData_Patients,"2015-01-25","2023-02-14")
+
+#redcap_repeat_instrument == "sgl_new_patient"
+# isolate last instance. redcap_repeat_instance 
+full_sgot_grab1 <- REDCapData_Patients %>% 
+  group_by(record_id) %>% 
+  fill(age,p_full_name,discord_invite_status,last_visit_date,deceased) %>% 
+  filter(redcap_repeat_instrument == "sgl_new_patient") %>% 
+  arrange(redcap_repeat_instance)
+
+
+  filter(redcap_repeat_instance == max(redcap_repeat_instance)) %>% 
+  select(record_id,p_full_name,discord_user,discord_nickname,id,discord_invite_status,age,deceased)
+
+
+
+volunteers <- Volunteers_REDCap %>% 
+  group_by(record_id) %>% 
+  fill(v_full_name,slstart,v_staff) %>% 
+  filter(redcap_repeat_instrument == "sgl_new_patient") %>% 
+  filter(redcap_repeat_instance == max(redcap_repeat_instance)) %>% 
+  select(record_id,v_full_name,slstart,v_staff,discord_userr,vol_discord_nickname,discordd_id)
+
+
+# NEXT, pull in data from Statbot dashboard
+# From: 2021-01-01 to 2023-02-14
+# Pulls anyone who has commented in the last 2 yrs 
+library(fuzzyjoin)
+statbot_data <- read_csv("members.csv")
+statbot_data_clean <- statbot_data %>% 
+  select(statbot_id = id,statbot_name = name,two_year_comments_count = count)
+statbot_data_clean$statbot_id <- as.character(statbot_data_clean$statbot_id)
+
+#Replace strings
+
+full_sgot_grab <- full_sgot_grab1 %>% 
+mutate(id = ifelse(is.na(id), "NA", id))
+
+statbot_patients <- stringdist_left_join(full_sgot_grab,statbot_data_clean, by = c("id"="statbot_id"), max_dist = 3. ,method = "lv")
+
+# bring in audio data
+
+statbot_data_voice <- read_csv("members_voice.csv")
+statbot_data_voice_clean <- statbot_data_voice %>% 
+  select(statbot_id = id,statbot_name = name,two_year_audio_hrs_count = count)
+statbot_data_clean$statbot_id <- as.character(statbot_data_clean$statbot_id)
+
+statbot_patients_with_audio <- stringdist_left_join(statbot_patients,statbot_data_voice_clean, by = c("id"="statbot_id"), max_dist = 3,method = "lv")
+today <- as.Date(Sys.Date())
+
+statbot_patients_with_audio_clean <- statbot_patients_with_audio %>% 
+  mutate(statbot_name =
+           case_when(is.na(statbot_name.x)~statbot_name.y,TRUE~statbot_name.x),
+         date_of_statbot_pull = today,
+         date_of_statbot_start = as.Date("2021-01-01")) %>%
+  select(-statbot_id.x,-statbot_id.y,-statbot_name.x,-statbot_name.y) %>% 
+  select(record_id,p_full_name,discord_user,discord_nickname,statbot_name,id,discord_invite_status,deceased,age,two_year_comments_count,two_year_audio_hrs_count,last_visit_date,date_of_statbot_pull,date_of_statbot_start)
+```
+
+
+```{r sgot-descriptives}
+sgot_descriptives <- read_csv("sgot_patients_2021_to_2023.csv")
+write_csv(sgot_descriptives,"sgot_patients_2021_to_2023.csv",na = "")
+sgot_descriptives$discord_invite_status
+table1(~discord_invite_status+deceased+ age + two_year_comments_count + two_year_audio_hrs_count, data = sgot_descriptives, transpose = TRUE)
+
+```
+
+
+
+
